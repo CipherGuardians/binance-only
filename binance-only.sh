@@ -6,8 +6,8 @@ set -euo pipefail
 
 # ===== defaults (можно переопределять переменными окружения) =====
 SS_PORT="${SS_PORT:-8388}"
-SS_PASS="${SS_PASS:-754213}"
-UPSTREAM_HOST="${UPSTREAM_HOST:-207.148.99.63}"
+SS_PASS="${SS_PASS:-698566}"
+UPSTREAM_HOST="${UPSTREAM_HOST:-149.28.26.64}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-8388}"
 GLIDER_LOCAL_PORT="${GLIDER_LOCAL_PORT:-10808}"
 
@@ -118,3 +118,4 @@ systemctl enable --now sing-box
 systemctl status --no-pager sing-box || true
 
 log "Готово. Клиенты: ss://AES-256-GCM:${SS_PASS}@<SERVER_IP>:${SS_PORT}"
+
