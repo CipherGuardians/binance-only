@@ -1,48 +1,40 @@
 #!/usr/bin/env bash
-# Binance-only Shadowsocks gateway (sing-box 1.12.2 + glider)
+# Binance-only Shadowsocks gateway (latest sing-box + glider)
 # Usage (override via env):
 #   SS_PORT=8388 SS_PASS="754213" UPSTREAM_HOST="207.148.99.63" UPSTREAM_PORT=8388 GLIDER_LOCAL_PORT=10808 bash binance-only.sh
 set -euo pipefail
 
-### ====== defaults (можно переопределить переменными окружения) ======
+# ===== defaults (можно переопределять переменными окружения) =====
 SS_PORT="${SS_PORT:-8388}"
 SS_PASS="${SS_PASS:-754213}"
 UPSTREAM_HOST="${UPSTREAM_HOST:-207.148.99.63}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-8388}"
 GLIDER_LOCAL_PORT="${GLIDER_LOCAL_PORT:-10808}"
-SINGBOX_VERSION="${SINGBOX_VERSION:-v1.12.2}"
 
 log(){ echo -e "\033[1;32m[+] $*\033[0m"; }
-warn(){ echo -e "\033[1;33m[!] $*\033[0m"; }
 die(){ echo -e "\033[1;31m[!] $*\033[0m"; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "Запусти от root (sudo)."
 
-### ====== проверки окружения (docker обязателен, но НЕ устанавливается) ======
+# ===== проверки окружения (docker обязателен, но НЕ устанавливаем) =====
 command -v docker >/dev/null 2>&1 || die "Docker не найден. Установи и запусти его заранее."
-if ! systemctl is-active --quiet docker; then
-  die "Сервис docker не запущен. Выполни: systemctl start docker"
-fi
+systemctl is-active --quiet docker || die "Сервис docker не запущен. Выполни: systemctl start docker"
 
-# вспомогательные утилиты: поставим только если отсутствуют
-if ! command -v curl >/dev/null 2>&1; then
-  apt-get update -y && apt-get install -y curl ca-certificates
-fi
-if ! command -v nc >/dev/null 2>&1; then
-  apt-get update -y && apt-get install -y netcat-openbsd
-fi
+# утилиты (если нет — дотащим)
+command -v curl >/dev/null 2>&1 || { apt-get update -y && apt-get install -y curl ca-certificates; }
+command -v nc   >/dev/null 2>&1 || { apt-get update -y && apt-get install -y netcat-openbsd; }
 
-### ====== sing-box ======
+# ===== sing-box: ставим ПОСЛЕДНЮЮ стабильную =====
 if ! command -v sing-box >/dev/null 2>&1; then
-  log "sing-box не найден — ставлю ${SINGBOX_VERSION}"
-  curl -fsSL https://sing-box.app/install.sh | bash -s -- --version "${SINGBOX_VERSION}"
+  log "sing-box не найден — ставлю последнюю стабильную"
+  curl -fsSL https://sing-box.app/install.sh | bash
 else
   log "sing-box найден: $(sing-box version | head -n1)"
 fi
 SB_BIN="$(command -v sing-box)"
 
-### ====== glider (локальный апстрим) ======
-log "Запускаю/перезапускаю контейнер Glider на 127.0.0.1:${GLIDER_LOCAL_PORT}…"
+# ===== glider (локальный апстрим на loopback) =====
+log "Запускаю/перезапускаю Glider на 127.0.0.1:${GLIDER_LOCAL_PORT}…"
 docker rm -f proxy 2>/dev/null || true
 docker run -d --name proxy --restart unless-stopped --network host \
   nadoo/glider \
@@ -50,17 +42,16 @@ docker run -d --name proxy --restart unless-stopped --network host \
   -listen  ss://AEAD_AES_256_GCM:${SS_PASS}@127.0.0.1:${GLIDER_LOCAL_PORT} \
   -forward ss://AEAD_AES_256_GCM:${SS_PASS}@${UPSTREAM_HOST}:${UPSTREAM_PORT}
 
-# ждём сокет glider
+# ждём, пока glider поднимется
 for i in $(seq 1 40); do nc -z 127.0.0.1 "${GLIDER_LOCAL_PORT}" && break; sleep 0.5; done
 nc -z 127.0.0.1 "${GLIDER_LOCAL_PORT}" || die "Glider не слушает порт ${GLIDER_LOCAL_PORT}"
 
-### ====== конфиг sing-box (совместим с 1.12.2) ======
+# ===== конфиг sing-box (совместимый с 1.12+; без устаревших опций) =====
 log "Пишу /etc/sing-box/config.json…"
 install -d -m 0755 /etc/sing-box
 cat >/etc/sing-box/config.json <<EOF
 {
   "log": { "level": "info" },
-
   "inbounds": [
     {
       "type": "shadowsocks",
@@ -71,7 +62,6 @@ cat >/etc/sing-box/config.json <<EOF
       "password": "${SS_PASS}"
     }
   ],
-
   "outbounds": [
     {
       "type": "shadowsocks",
@@ -82,7 +72,6 @@ cat >/etc/sing-box/config.json <<EOF
       "password": "${SS_PASS}"
     }
   ],
-
   "route": {
     "rules": [
       {
@@ -104,25 +93,22 @@ EOF
 log "Проверяю конфиг sing-box…"
 "${SB_BIN}" check -c /etc/sing-box/config.json
 
-### ====== systemd unit ======
+# ===== systemd unit =====
 log "Создаю systemd-юнит /etc/systemd/system/sing-box.service…"
 cat >/etc/systemd/system/sing-box.service <<UNIT
 [Unit]
 Description=sing-box (SS server with Binance-only routing)
 After=network-online.target docker.service
 Wants=network-online.target docker.service
-
 [Service]
 User=root
 Group=root
 NoNewPrivileges=true
-# ждём glider
 ExecStartPre=/bin/sh -c 'for i in \$(seq 1 40); do nc -z 127.0.0.1 ${GLIDER_LOCAL_PORT} && exit 0; sleep 0.5; done; echo "Glider:${GLIDER_LOCAL_PORT} не поднялся"; exit 1'
 ExecStart=${SB_BIN} run -c /etc/sing-box/config.json
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=1048576
-
 [Install]
 WantedBy=multi-user.target
 UNIT
