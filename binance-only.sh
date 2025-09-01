@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Binance-only Shadowsocks gateway (latest sing-box + glider)
+# Binance-only Shadowsocks gateway (latest sing-box + glider SOCKS)
 # Usage (override via env):
 #   SS_PORT=8388 SS_PASS="754213" UPSTREAM_HOST="207.148.99.63" UPSTREAM_PORT=8388 GLIDER_LOCAL_PORT=10808 bash binance-only.sh
 set -euo pipefail
 
-# ===== defaults (можно переопределять переменными окружения) =====
+# ===== defaults =====
 SS_PORT="${SS_PORT:-8388}"
-SS_PASS="${SS_PASS:-369848}"
-UPSTREAM_HOST="${UPSTREAM_HOST:-202.182.96.27}"
+SS_PASS="${SS_PASS:-568656}"
+UPSTREAM_HOST="${UPSTREAM_HOST:-45.76.202.228}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-8388}"
 GLIDER_LOCAL_PORT="${GLIDER_LOCAL_PORT:-10808}"
 
@@ -16,15 +16,13 @@ die(){ echo -e "\033[1;31m[!] $*\033[0m"; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "Запусти от root (sudo)."
 
-# ===== проверки окружения (docker обязателен, но НЕ устанавливаем) =====
+# ===== окружение =====
 command -v docker >/dev/null 2>&1 || die "Docker не найден. Установи и запусти его заранее."
 systemctl is-active --quiet docker || die "Сервис docker не запущен. Выполни: systemctl start docker"
-
-# утилиты (если нет — дотащим)
 command -v curl >/dev/null 2>&1 || { apt-get update -y && apt-get install -y curl ca-certificates; }
 command -v nc   >/dev/null 2>&1 || { apt-get update -y && apt-get install -y netcat-openbsd; }
 
-# ===== sing-box: ставим ПОСЛЕДНЮЮ стабильную =====
+# ===== sing-box: последняя стабильная =====
 if ! command -v sing-box >/dev/null 2>&1; then
   log "sing-box не найден — ставлю последнюю стабильную"
   curl -fsSL https://sing-box.app/install.sh | bash
@@ -33,25 +31,26 @@ else
 fi
 SB_BIN="$(command -v sing-box)"
 
-# ===== glider (локальный апстрим на loopback) =====
-log "Запускаю/перезапускаю Glider на 127.0.0.1:${GLIDER_LOCAL_PORT}…"
+# ===== glider: ЛОКАЛЬНЫЙ SOCKS5 (без SS на loopback) =====
+log "Запускаю/перезапускаю Glider (SOCKS5) на 127.0.0.1:${GLIDER_LOCAL_PORT}…"
 docker rm -f proxy 2>/dev/null || true
 docker run -d --name proxy --restart unless-stopped --network host \
   nadoo/glider \
   -verbose \
-  -listen  ss://AEAD_AES_256_GCM:${SS_PASS}@127.0.0.1:${GLIDER_LOCAL_PORT} \
+  -listen socks5://127.0.0.1:${GLIDER_LOCAL_PORT} \
   -forward ss://AEAD_AES_256_GCM:${SS_PASS}@${UPSTREAM_HOST}:${UPSTREAM_PORT}
 
-# ждём, пока glider поднимется
+# ждём подъёма glider
 for i in $(seq 1 40); do nc -z 127.0.0.1 "${GLIDER_LOCAL_PORT}" && break; sleep 0.5; done
 nc -z 127.0.0.1 "${GLIDER_LOCAL_PORT}" || die "Glider не слушает порт ${GLIDER_LOCAL_PORT}"
 
-# ===== конфиг sing-box (совместимый с 1.12+; без устаревших опций) =====
+# ===== конфиг sing-box =====
 log "Пишу /etc/sing-box/config.json…"
 install -d -m 0755 /etc/sing-box
 cat >/etc/sing-box/config.json <<EOF
 {
   "log": { "level": "info" },
+
   "inbounds": [
     {
       "type": "shadowsocks",
@@ -62,16 +61,16 @@ cat >/etc/sing-box/config.json <<EOF
       "password": "${SS_PASS}"
     }
   ],
+
   "outbounds": [
     {
-      "type": "shadowsocks",
-      "tag": "ss-glider",
+      "type": "socks",
+      "tag": "to-glider",
       "server": "127.0.0.1",
-      "server_port": ${GLIDER_LOCAL_PORT},
-      "method": "aes-256-gcm",
-      "password": "${SS_PASS}"
+      "server_port": ${GLIDER_LOCAL_PORT}
     }
   ],
+
   "route": {
     "rules": [
       {
@@ -82,7 +81,7 @@ cat >/etc/sing-box/config.json <<EOF
           "stream.binance.com",
           "fstream.binance.com"
         ],
-        "outbound": "ss-glider"
+        "outbound": "to-glider"
       },
       { "action": "reject" }
     ]
@@ -97,9 +96,10 @@ log "Проверяю конфиг sing-box…"
 log "Создаю systemd-юнит /etc/systemd/system/sing-box.service…"
 cat >/etc/systemd/system/sing-box.service <<UNIT
 [Unit]
-Description=sing-box (SS server with Binance-only routing)
+Description=sing-box (SS server with Binance-only routing via local SOCKS glider)
 After=network-online.target docker.service
 Wants=network-online.target docker.service
+
 [Service]
 User=root
 Group=root
@@ -109,6 +109,7 @@ ExecStart=${SB_BIN} run -c /etc/sing-box/config.json
 Restart=on-failure
 RestartSec=2
 LimitNOFILE=1048576
+
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -118,5 +119,3 @@ systemctl enable --now sing-box
 systemctl status --no-pager sing-box || true
 
 log "Готово. Клиенты: ss://AES-256-GCM:${SS_PASS}@<SERVER_IP>:${SS_PORT}"
-
-
